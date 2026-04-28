@@ -40,7 +40,6 @@ export default function RecordingComponent({ onUpload }) {
       setRecordingTime(0);
       if (timerRef.current) clearInterval(timerRef.current);
 
-      // Stop mic tracks
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
@@ -53,7 +52,6 @@ export default function RecordingComponent({ onUpload }) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      // Pick a supported MIME type
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/webm")
@@ -88,15 +86,16 @@ export default function RecordingComponent({ onUpload }) {
         const ext = actualMime.includes("webm") ? "webm" : "ogg";
         const file = new File([audioBlob], `recording.${ext}`, { type: actualMime });
         audioChunksRef.current = [];
-        await handleUpload(file);
+
+        // Create an audio URL from the blob so we can play back the REAL recording
+        const audioUrl = URL.createObjectURL(audioBlob);
+        await handleUpload(file, audioUrl);
       };
 
-      // Request data every 250ms so chunks accumulate during recording
       recorder.start(250);
       setIsRecording(true);
       setRecordingTime(0);
 
-      // Timer to show recording duration
       timerRef.current = setInterval(() => {
         setRecordingTime((prev) => prev + 1);
       }, 1000);
@@ -106,9 +105,15 @@ export default function RecordingComponent({ onUpload }) {
     }
   }, [isRecording]);
 
-  const handleUpload = async (file) => {
+  const handleUpload = async (file, audioUrl = null) => {
     setLoading(true);
     setError(null);
+
+    // If it's a file upload (not recording), create audioUrl from the file
+    if (!audioUrl && file) {
+      audioUrl = URL.createObjectURL(file);
+    }
+
     const formData = new FormData();
     formData.append("file", file);
 
@@ -121,15 +126,19 @@ export default function RecordingComponent({ onUpload }) {
       if (res.ok) {
         if (data.error) {
           setError(data.error);
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
         } else {
-          onUpload(data);
+          // Pass the real audio URL along with the analysis
+          onUpload({ ...data, audioUrl });
         }
       } else {
         setError(data.error || `Analysis failed (${res.status})`);
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
       }
     } catch (err) {
       console.error("Upload error:", err);
       setError("Upload failed. Check your connection.");
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
     } finally {
       setLoading(false);
     }
@@ -177,7 +186,7 @@ export default function RecordingComponent({ onUpload }) {
         </div>
       )}
 
-      {/* Recording Button — Click to toggle */}
+      {/* Recording Button */}
       <div style={{ textAlign: "center" }}>
         <div
           className={`pulse ${isRecording ? "recording" : ""}`}
@@ -197,7 +206,6 @@ export default function RecordingComponent({ onUpload }) {
           )}
         </div>
 
-        {/* Recording timer */}
         {isRecording && (
           <p
             style={{
@@ -228,7 +236,6 @@ export default function RecordingComponent({ onUpload }) {
         </p>
       </div>
 
-      {/* Waveform visualizer during recording */}
       {isRecording && (
         <div className="waveform-container" style={{ marginTop: "0.5rem" }}>
           {[...Array(8)].map((_, i) => (
@@ -237,14 +244,12 @@ export default function RecordingComponent({ onUpload }) {
         </div>
       )}
 
-      {/* Divider */}
       <div style={{ display: "flex", alignItems: "center", gap: "1rem", margin: "1.5rem 0" }}>
         <div style={{ flex: 1, height: "1px", background: "var(--border-color)" }} />
         <span style={{ color: "var(--text-secondary)", fontSize: "0.85rem" }}>or</span>
         <div style={{ flex: 1, height: "1px", background: "var(--border-color)" }} />
       </div>
 
-      {/* File Upload Drop Zone */}
       <div
         className={`upload-zone ${dragOver ? "drag-over" : ""}`}
         onDragOver={(e) => {

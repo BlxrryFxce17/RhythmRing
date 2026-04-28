@@ -6,7 +6,6 @@ import { getAudioContext, playSnippet, playAllSnippets } from "@/utils/audioUtil
 
 export default function RingWorkspace({ ring, onBack }) {
   const [snippets, setSnippets] = useState(() => {
-    // Use pre-built snippets from ring data, or defaults
     if (ring.snippets && ring.snippets.length > 0) {
       return ring.snippets.map((s) => ({
         ...s,
@@ -30,8 +29,10 @@ export default function RingWorkspace({ ring, onBack }) {
   const playTimerRef = useRef(null);
   const progressTimerRef = useRef(null);
   const activeStopRef = useRef(null);
+  // Track all real audio elements so we can stop them
+  const audioElementsRef = useRef([]);
 
-  // Cleanup timers on unmount
+  // Cleanup timers and audio on unmount
   useEffect(() => {
     return () => {
       if (playTimerRef.current) clearTimeout(playTimerRef.current);
@@ -40,6 +41,18 @@ export default function RingWorkspace({ ring, onBack }) {
         activeStopRef.current();
         activeStopRef.current = null;
       }
+      // Stop and revoke all audio elements
+      audioElementsRef.current.forEach((audio) => {
+        audio.pause();
+        audio.src = "";
+      });
+      audioElementsRef.current = [];
+      // Revoke any blob URLs
+      snippets.forEach((s) => {
+        if (s.audioUrl && s.audioUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(s.audioUrl);
+        }
+      });
     };
   }, []);
 
@@ -60,36 +73,62 @@ export default function RingWorkspace({ ring, onBack }) {
       color: roleColors[analysis.role] || "var(--accent-tertiary)",
       bpm: analysis.bpm,
       mood: analysis.mood,
+      // Store the real audio URL from the recording
+      audioUrl: analysis.audioUrl || null,
     };
     setSnippets((prev) => [...prev, newSnippet]);
   }, []);
 
+  // Play a single snippet — use real audio if available, else synthesize
   const handlePlaySnippet = useCallback((snippet) => {
-    const ctx = getAudioContext();
     setPlayingSnippetId(snippet.id);
-    
-    if (activeStopRef.current) activeStopRef.current();
-    
-    const { duration, stop } = playSnippet(ctx, snippet);
-    activeStopRef.current = stop;
 
-    // Reset playing state after sound finishes
-    setTimeout(() => {
-      setPlayingSnippetId(null);
-      if (activeStopRef.current === stop) activeStopRef.current = null;
-    }, duration * 1000 + 50);
+    if (snippet.audioUrl) {
+      // Play the REAL recorded audio
+      const audio = new Audio(snippet.audioUrl);
+      audioElementsRef.current.push(audio);
+
+      audio.onended = () => {
+        setPlayingSnippetId(null);
+        audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
+      };
+      audio.onerror = () => {
+        setPlayingSnippetId(null);
+        audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
+      };
+      audio.play().catch(() => setPlayingSnippetId(null));
+    } else {
+      // Fallback to synthesis for example/demo snippets
+      const ctx = getAudioContext();
+      if (activeStopRef.current) activeStopRef.current();
+
+      const { duration, stop } = playSnippet(ctx, snippet);
+      activeStopRef.current = stop;
+
+      setTimeout(() => {
+        setPlayingSnippetId(null);
+        if (activeStopRef.current === stop) activeStopRef.current = null;
+      }, duration * 1000 + 50);
+    }
   }, []);
 
+  // Play all snippets
   const handlePlayAll = useCallback(() => {
     if (snippets.length === 0) return;
 
     if (isPlaying) {
-      // Stop
+      // Stop everything
       setIsPlaying(false);
       setProgress(0);
       if (playTimerRef.current) clearTimeout(playTimerRef.current);
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
-      
+      // Stop real audio elements
+      audioElementsRef.current.forEach((audio) => {
+        audio.pause();
+        audio.currentTime = 0;
+      });
+      audioElementsRef.current = [];
+      // Stop synthesized audio
       if (activeStopRef.current) {
         activeStopRef.current();
         activeStopRef.current = null;
@@ -97,19 +136,45 @@ export default function RingWorkspace({ ring, onBack }) {
       return;
     }
 
-    const ctx = getAudioContext();
-    
-    if (activeStopRef.current) activeStopRef.current();
-    
-    const { duration: totalDuration, stop } = playAllSnippets(ctx, snippets);
-    activeStopRef.current = stop;
-    
     setIsPlaying(true);
     setProgress(0);
 
+    // Separate real-audio and synth-only snippets
+    const realAudioSnippets = snippets.filter((s) => s.audioUrl);
+    const synthSnippets = snippets.filter((s) => !s.audioUrl);
+
+    let maxDuration = 0;
+
+    // Play real audio snippets with staggered timing
+    realAudioSnippets.forEach((s, i) => {
+      const delay = i * 500; // 500ms apart
+      setTimeout(() => {
+        const audio = new Audio(s.audioUrl);
+        audioElementsRef.current.push(audio);
+        audio.onended = () => {
+          audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
+        };
+        audio.play().catch(() => {});
+      }, delay);
+      // Estimate 3s per real audio clip
+      maxDuration = Math.max(maxDuration, (delay + 3000) / 1000);
+    });
+
+    // Play synthesized snippets
+    if (synthSnippets.length > 0) {
+      const ctx = getAudioContext();
+      if (activeStopRef.current) activeStopRef.current();
+      const { duration: synthDuration, stop } = playAllSnippets(ctx, synthSnippets);
+      activeStopRef.current = stop;
+      maxDuration = Math.max(maxDuration, synthDuration);
+    }
+
+    // Ensure minimum duration for progress bar
+    maxDuration = Math.max(maxDuration, 1);
+
     // Animate progress bar
     const startTime = Date.now();
-    const durationMs = totalDuration * 1000;
+    const durationMs = maxDuration * 1000;
     progressTimerRef.current = setInterval(() => {
       const elapsed = Date.now() - startTime;
       const pct = Math.min((elapsed / durationMs) * 100, 100);
@@ -123,8 +188,11 @@ export default function RingWorkspace({ ring, onBack }) {
       setIsPlaying(false);
       setProgress(0);
       clearInterval(progressTimerRef.current);
-      if (activeStopRef.current === stop) activeStopRef.current = null;
-    }, durationMs + 100);
+      if (activeStopRef.current) {
+        activeStopRef.current();
+        activeStopRef.current = null;
+      }
+    }, durationMs + 200);
   }, [snippets, isPlaying]);
 
   const roleIcon = (role) => {
@@ -162,7 +230,6 @@ export default function RingWorkspace({ ring, onBack }) {
               Sounds Layered
             </p>
 
-            {/* Play / Stop button */}
             <button
               className={`btn ${isPlaying ? "btn-danger" : "btn-primary"}`}
               style={{ padding: "0.5rem 1.25rem" }}
@@ -172,7 +239,6 @@ export default function RingWorkspace({ ring, onBack }) {
               {isPlaying ? "■ Stop" : "▶ Play Track"}
             </button>
 
-            {/* Waveform when playing */}
             {isPlaying && (
               <div className="waveform-container" style={{ marginTop: "0.5rem" }}>
                 {[...Array(8)].map((_, i) => (
@@ -182,7 +248,7 @@ export default function RingWorkspace({ ring, onBack }) {
             )}
           </div>
 
-          {/* Sound Nodes on the Ring — clickable to play individual sounds */}
+          {/* Sound Nodes on the Ring */}
           {snippets.map((s, i) => {
             const angle = (i / snippets.length) * 360;
             const isNodePlaying = playingSnippetId === s.id;
@@ -279,7 +345,14 @@ export default function RingWorkspace({ ring, onBack }) {
                         {isItemPlaying ? "■" : "▶"}
                       </button>
                       <div>
-                        <p style={{ fontWeight: "600", fontSize: "0.95rem" }}>{s.description}</p>
+                        <p style={{ fontWeight: "600", fontSize: "0.95rem" }}>
+                          {s.description}
+                          {s.audioUrl && (
+                            <span style={{ fontSize: "0.7rem", marginLeft: "0.5rem", opacity: 0.6 }}>
+                              🔊 real audio
+                            </span>
+                          )}
+                        </p>
                         <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
                           By {s.user}
                           {s.bpm && ` · ${s.bpm} BPM`}

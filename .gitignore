@@ -23,6 +23,9 @@
 # misc
 .DS_Store
 *.pem
+AGENTS.md 
+CLAUDE.md 
+RythmRing.*
 
 # debug
 npm-debug.log*

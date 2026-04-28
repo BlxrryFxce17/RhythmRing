@@ -5,29 +5,62 @@ import { useState, useRef, useCallback, useEffect } from "react";
 export default function RecordingComponent({ onUpload }) {
   const [isRecording, setIsRecording] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const streamRef = useRef(null);
   const fileInputRef = useRef(null);
+  const timerRef = useRef(null);
 
-  // Cleanup on unmount — stop any active streams
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
       }
+      if (timerRef.current) clearInterval(timerRef.current);
       mediaRecorderRef.current = null;
       audioChunksRef.current = [];
     };
   }, []);
 
-  const startRecording = useCallback(async () => {
+  // Toggle recording: click to start, click to stop
+  const toggleRecording = useCallback(async () => {
+    setError(null);
+
+    if (isRecording) {
+      // STOP recording
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+      setIsRecording(false);
+      setRecordingTime(0);
+      if (timerRef.current) clearInterval(timerRef.current);
+
+      // Stop mic tracks
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      return;
+    }
+
+    // START recording
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
+
+      // Pick a supported MIME type
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "";
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
 
@@ -38,34 +71,44 @@ export default function RecordingComponent({ onUpload }) {
       };
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        const file = new File([audioBlob], "recording.webm", { type: "audio/webm" });
-        audioChunksRef.current = []; // free memory
+        const chunks = audioChunksRef.current;
+        if (chunks.length === 0) {
+          setError("No audio data captured. Try recording for longer.");
+          return;
+        }
+
+        const actualMime = recorder.mimeType || "audio/webm";
+        const audioBlob = new Blob(chunks, { type: actualMime });
+
+        if (audioBlob.size < 1000) {
+          setError("Recording too short. Please record for at least 1 second.");
+          return;
+        }
+
+        const ext = actualMime.includes("webm") ? "webm" : "ogg";
+        const file = new File([audioBlob], `recording.${ext}`, { type: actualMime });
+        audioChunksRef.current = [];
         await handleUpload(file);
       };
 
-      recorder.start();
+      // Request data every 250ms so chunks accumulate during recording
+      recorder.start(250);
       setIsRecording(true);
+      setRecordingTime(0);
+
+      // Timer to show recording duration
+      timerRef.current = setInterval(() => {
+        setRecordingTime((prev) => prev + 1);
+      }, 1000);
     } catch (err) {
       console.error("Microphone error:", err);
-      alert("Please allow microphone access to record sounds.");
-    }
-  }, []);
-
-  const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      // Stop all tracks
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
+      setError("Microphone access denied. Please allow mic permission and try again.");
     }
   }, [isRecording]);
 
   const handleUpload = async (file) => {
     setLoading(true);
+    setError(null);
     const formData = new FormData();
     formData.append("file", file);
 
@@ -76,14 +119,17 @@ export default function RecordingComponent({ onUpload }) {
       });
       const data = await res.json();
       if (res.ok) {
-        onUpload(data);
+        if (data.error) {
+          setError(data.error);
+        } else {
+          onUpload(data);
+        }
       } else {
-        console.error("Analysis failed:", data.error);
-        alert("Analysis failed. Please try again.");
+        setError(data.error || `Analysis failed (${res.status})`);
       }
     } catch (err) {
       console.error("Upload error:", err);
-      alert("Upload failed. Check your connection.");
+      setError("Upload failed. Check your connection.");
     } finally {
       setLoading(false);
     }
@@ -92,7 +138,6 @@ export default function RecordingComponent({ onUpload }) {
   const handleFileInput = (e) => {
     const file = e.target.files?.[0];
     if (file) handleUpload(file);
-    // Reset input so same file can be picked again
     e.target.value = "";
   };
 
@@ -103,24 +148,46 @@ export default function RecordingComponent({ onUpload }) {
     if (file && file.type.startsWith("audio/")) {
       handleUpload(file);
     } else if (file) {
-      alert("Please drop an audio file (mp3, wav, etc.).");
+      setError("Please drop an audio file (mp3, wav, etc.).");
     }
+  };
+
+  const formatTime = (seconds) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
   return (
     <div style={{ padding: "1rem" }}>
-      {/* Recording Button */}
+      {/* Error display */}
+      {error && (
+        <div
+          style={{
+            background: "rgba(255, 77, 77, 0.1)",
+            border: "1px solid var(--danger)",
+            borderRadius: "12px",
+            padding: "0.75rem 1rem",
+            marginBottom: "1rem",
+            fontSize: "0.85rem",
+            color: "var(--danger)",
+          }}
+        >
+          ⚠️ {error}
+        </div>
+      )}
+
+      {/* Recording Button — Click to toggle */}
       <div style={{ textAlign: "center" }}>
         <div
           className={`pulse ${isRecording ? "recording" : ""}`}
-          onMouseDown={startRecording}
-          onMouseUp={stopRecording}
-          onTouchStart={startRecording}
-          onTouchEnd={stopRecording}
+          onClick={!loading ? toggleRecording : undefined}
           style={{
             margin: "0 auto",
             backgroundColor: isRecording ? "var(--danger)" : "var(--accent-tertiary)",
             userSelect: "none",
+            opacity: loading ? 0.5 : 1,
+            pointerEvents: loading ? "none" : "auto",
           }}
         >
           {loading ? (
@@ -129,12 +196,35 @@ export default function RecordingComponent({ onUpload }) {
             <span style={{ fontSize: "1.5rem" }}>{isRecording ? "⏹" : "🎤"}</span>
           )}
         </div>
-        <p style={{ marginTop: "1rem", color: "var(--text-secondary)", fontWeight: "500", fontSize: "0.9rem" }}>
+
+        {/* Recording timer */}
+        {isRecording && (
+          <p
+            style={{
+              marginTop: "0.75rem",
+              fontSize: "1.5rem",
+              fontWeight: "700",
+              fontFamily: "monospace",
+              color: "var(--danger)",
+            }}
+          >
+            {formatTime(recordingTime)}
+          </p>
+        )}
+
+        <p
+          style={{
+            marginTop: "0.5rem",
+            color: "var(--text-secondary)",
+            fontWeight: "500",
+            fontSize: "0.9rem",
+          }}
+        >
           {loading
             ? "Analyzing with Gemini AI..."
             : isRecording
-            ? "Recording... Release to analyze"
-            : "Hold to record a sound"}
+            ? "Recording... Click to stop"
+            : "Click to start recording"}
         </p>
       </div>
 

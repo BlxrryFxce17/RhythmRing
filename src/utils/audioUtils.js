@@ -5,6 +5,20 @@
  */
 
 let _audioCtx = null;
+let _noiseBuffer = null;
+
+/** Get or create a 1-second white noise buffer (shared) */
+function getNoiseBuffer(ctx) {
+  if (!_noiseBuffer) {
+    const bufferSize = ctx.sampleRate * 2.0; // 2 seconds of noise
+    _noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = _noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+  }
+  return _noiseBuffer;
+}
 
 /** Get or create the shared AudioContext (lazy) */
 export function getAudioContext() {
@@ -29,9 +43,11 @@ export function closeAudioContext() {
 
 /**
  * Percussive kick / snap sound
+ * Returns: { duration, nodes }
  */
 export function generateBeat(ctx, startTime = 0, variant = 0) {
   const t = ctx.currentTime + startTime;
+  const nodes = [];
 
   // Oscillator for body
   const osc = ctx.createOscillator();
@@ -45,16 +61,11 @@ export function generateBeat(ctx, startTime = 0, variant = 0) {
   oscGain.connect(ctx.destination);
   osc.start(t);
   osc.stop(t + 0.25);
+  nodes.push(osc, oscGain);
 
-  // Noise burst for click
-  const bufferSize = ctx.sampleRate * 0.05;
-  const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-  const data = noiseBuffer.getChannelData(0);
-  for (let i = 0; i < bufferSize; i++) {
-    data[i] = (Math.random() * 2 - 1) * 0.4;
-  }
+  // Reusable noise for click
   const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuffer;
+  noise.buffer = getNoiseBuffer(ctx);
   const noiseGain = ctx.createGain();
   noiseGain.gain.setValueAtTime(0.6, t);
   noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
@@ -62,8 +73,9 @@ export function generateBeat(ctx, startTime = 0, variant = 0) {
   noiseGain.connect(ctx.destination);
   noise.start(t);
   noise.stop(t + 0.06);
+  nodes.push(noise, noiseGain);
 
-  return 0.3; // duration in seconds
+  return { duration: 0.3, nodes };
 }
 
 /**
@@ -72,6 +84,7 @@ export function generateBeat(ctx, startTime = 0, variant = 0) {
 export function generateMelody(ctx, startTime = 0, noteFreq = 440) {
   const t = ctx.currentTime + startTime;
   const duration = 0.6;
+  const nodes = [];
 
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -87,6 +100,7 @@ export function generateMelody(ctx, startTime = 0, noteFreq = 440) {
   lfoGain.connect(osc.frequency);
   lfo.start(t);
   lfo.stop(t + duration);
+  nodes.push(lfo, lfoGain);
 
   gain.gain.setValueAtTime(0, t);
   gain.gain.linearRampToValueAtTime(0.5, t + 0.05);
@@ -97,8 +111,9 @@ export function generateMelody(ctx, startTime = 0, noteFreq = 440) {
   gain.connect(ctx.destination);
   osc.start(t);
   osc.stop(t + duration);
+  nodes.push(osc, gain);
 
-  return duration;
+  return { duration, nodes };
 }
 
 /**
@@ -107,6 +122,7 @@ export function generateMelody(ctx, startTime = 0, noteFreq = 440) {
 export function generateVocal(ctx, startTime = 0, pitch = 220) {
   const t = ctx.currentTime + startTime;
   const duration = 0.5;
+  const nodes = [];
 
   // Sawtooth for vocal formant
   const osc = ctx.createOscillator();
@@ -130,8 +146,9 @@ export function generateVocal(ctx, startTime = 0, pitch = 220) {
   gain.connect(ctx.destination);
   osc.start(t);
   osc.stop(t + duration);
+  nodes.push(osc, filter, gain);
 
-  return duration;
+  return { duration, nodes };
 }
 
 /**
@@ -140,17 +157,11 @@ export function generateVocal(ctx, startTime = 0, pitch = 220) {
 export function generateTexture(ctx, startTime = 0) {
   const t = ctx.currentTime + startTime;
   const duration = 1.0;
-  const bufferSize = ctx.sampleRate * duration;
-  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-  const data = buffer.getChannelData(0);
-
-  // Filtered noise
-  for (let i = 0; i < bufferSize; i++) {
-    data[i] = (Math.random() * 2 - 1) * 0.15;
-  }
+  const nodes = [];
 
   const source = ctx.createBufferSource();
-  source.buffer = buffer;
+  source.buffer = getNoiseBuffer(ctx);
+  source.loop = true;
 
   const filter = ctx.createBiquadFilter();
   filter.type = "lowpass";
@@ -169,8 +180,9 @@ export function generateTexture(ctx, startTime = 0) {
   gain.connect(ctx.destination);
   source.start(t);
   source.stop(t + duration);
+  nodes.push(source, filter, gain);
 
-  return duration;
+  return { duration, nodes };
 }
 
 /* ─── Playback Helpers ──────────────────────────────────── */
@@ -181,31 +193,56 @@ const NOTE_MAP = {
 };
 
 /**
+ * Helper to stop and disconnect a list of nodes
+ */
+function stopNodes(nodes) {
+  nodes.forEach((node) => {
+    try {
+      if (node.stop) node.stop();
+      node.disconnect();
+    } catch (e) {
+      // Node might already be stopped or not have stop()
+    }
+  });
+}
+
+/**
  * Play a single snippet based on its role.
- * Returns the duration of the sound.
+ * Returns: { duration, stop: Function }
  */
 export function playSnippet(ctx, snippet, startTime = 0) {
   const freq = NOTE_MAP[snippet.note] || 440;
+  let result;
   switch (snippet.role) {
     case "beat":
-      return generateBeat(ctx, startTime, snippet.variant || 0);
+      result = generateBeat(ctx, startTime, snippet.variant || 0);
+      break;
     case "melody":
-      return generateMelody(ctx, startTime, freq);
+      result = generateMelody(ctx, startTime, freq);
+      break;
     case "vocal":
-      return generateVocal(ctx, startTime, freq / 2);
+      result = generateVocal(ctx, startTime, freq / 2);
+      break;
     case "texture":
-      return generateTexture(ctx, startTime);
+      result = generateTexture(ctx, startTime);
+      break;
     default:
-      return generateBeat(ctx, startTime);
+      result = generateBeat(ctx, startTime);
   }
+
+  return {
+    duration: result.duration,
+    stop: () => stopNodes(result.nodes),
+  };
 }
 
 /**
  * Play all snippets layered as a "track".
- * Beat-role snippets play as a rhythmic pattern; others layer on top.
+ * Returns: { duration, stop: Function }
  */
 export function playAllSnippets(ctx, snippets) {
   let maxDuration = 0;
+  const allStops = [];
 
   // Separate by role
   const beats = snippets.filter((s) => s.role === "beat");
@@ -214,18 +251,23 @@ export function playAllSnippets(ctx, snippets) {
   // Play beats as a rhythmic sequence
   beats.forEach((s, i) => {
     const t = i * 0.35;
-    const dur = playSnippet(ctx, s, t);
-    maxDuration = Math.max(maxDuration, t + dur);
+    const { duration, stop } = playSnippet(ctx, s, t);
+    allStops.push(stop);
+    maxDuration = Math.max(maxDuration, t + duration);
   });
 
   // Layer melodic / vocal / texture with slight offsets
   others.forEach((s, i) => {
     const t = 0.1 + i * 0.5;
-    const dur = playSnippet(ctx, s, t);
-    maxDuration = Math.max(maxDuration, t + dur);
+    const { duration, stop } = playSnippet(ctx, s, t);
+    allStops.push(stop);
+    maxDuration = Math.max(maxDuration, t + duration);
   });
 
-  return maxDuration;
+  return {
+    duration: maxDuration,
+    stop: () => allStops.forEach((s) => s()),
+  };
 }
 
 /* ─── Example Snippet Data ──────────────────────────────── */

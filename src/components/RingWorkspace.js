@@ -29,12 +29,17 @@ export default function RingWorkspace({ ring, onBack }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const playTimerRef = useRef(null);
   const progressTimerRef = useRef(null);
+  const activeStopRef = useRef(null);
 
   // Cleanup timers on unmount
   useEffect(() => {
     return () => {
       if (playTimerRef.current) clearTimeout(playTimerRef.current);
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      if (activeStopRef.current) {
+        activeStopRef.current();
+        activeStopRef.current = null;
+      }
     };
   }, []);
 
@@ -62,9 +67,17 @@ export default function RingWorkspace({ ring, onBack }) {
   const handlePlaySnippet = useCallback((snippet) => {
     const ctx = getAudioContext();
     setPlayingSnippetId(snippet.id);
-    const duration = playSnippet(ctx, snippet);
+    
+    if (activeStopRef.current) activeStopRef.current();
+    
+    const { duration, stop } = playSnippet(ctx, snippet);
+    activeStopRef.current = stop;
+
     // Reset playing state after sound finishes
-    setTimeout(() => setPlayingSnippetId(null), duration * 1000 + 50);
+    setTimeout(() => {
+      setPlayingSnippetId(null);
+      if (activeStopRef.current === stop) activeStopRef.current = null;
+    }, duration * 1000 + 50);
   }, []);
 
   const handlePlayAll = useCallback(() => {
@@ -76,11 +89,21 @@ export default function RingWorkspace({ ring, onBack }) {
       setProgress(0);
       if (playTimerRef.current) clearTimeout(playTimerRef.current);
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      
+      if (activeStopRef.current) {
+        activeStopRef.current();
+        activeStopRef.current = null;
+      }
       return;
     }
 
     const ctx = getAudioContext();
-    const totalDuration = playAllSnippets(ctx, snippets);
+    
+    if (activeStopRef.current) activeStopRef.current();
+    
+    const { duration: totalDuration, stop } = playAllSnippets(ctx, snippets);
+    activeStopRef.current = stop;
+    
     setIsPlaying(true);
     setProgress(0);
 
@@ -100,6 +123,7 @@ export default function RingWorkspace({ ring, onBack }) {
       setIsPlaying(false);
       setProgress(0);
       clearInterval(progressTimerRef.current);
+      if (activeStopRef.current === stop) activeStopRef.current = null;
     }, durationMs + 100);
   }, [snippets, isPlaying]);
 

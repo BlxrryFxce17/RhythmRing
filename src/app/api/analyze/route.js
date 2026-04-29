@@ -13,7 +13,6 @@ const fileManager = new GoogleAIFileManager(API_KEY);
 export async function POST(request) {
   let tempFilePath = null;
 
-  // Check API key first
   if (!API_KEY) {
     return NextResponse.json(
       { error: 'GEMINI_API_KEY is not set. Add it to your environment variables.' },
@@ -29,10 +28,8 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
     }
 
-    // Determine MIME type — MediaRecorder often sends audio/webm
     let mimeType = file.type;
     if (!mimeType || mimeType === 'application/octet-stream') {
-      // Guess from file extension
       const ext = (file.name?.split('.').pop() || '').toLowerCase();
       const mimeMap = {
         webm: 'audio/webm',
@@ -53,13 +50,12 @@ export async function POST(request) {
       );
     }
 
-    // Convert file to buffer and save to temp
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
     if (buffer.length < 100) {
       return NextResponse.json(
-        { error: 'Audio file is too small / empty. Please record for longer.' },
+        { error: 'Audio file is too small / empty.' },
         { status: 400 }
       );
     }
@@ -69,13 +65,11 @@ export async function POST(request) {
     tempFilePath = path.join(tempDir, `upload-${Date.now()}.${extension}`);
     await fs.writeFile(tempFilePath, buffer);
 
-    // Upload to Gemini via File Manager
     const uploadResponse = await fileManager.uploadFile(tempFilePath, {
       mimeType,
       displayName: 'Contribution Snippet',
     });
 
-    // Wait for processing
     let fileState = await fileManager.getFile(uploadResponse.file.name);
     let waitAttempts = 0;
     while (fileState.state === 'PROCESSING' && waitAttempts < 30) {
@@ -85,20 +79,20 @@ export async function POST(request) {
     }
 
     if (fileState.state === 'FAILED') {
-      throw new Error('Gemini could not process the audio file. Try a different format or longer recording.');
+      throw new Error('Gemini could not process the audio file.');
     }
 
     const prompt = `
-      You are a world-class music producer and sound designer. 
-      Analyze this audio snippet recorded by a user for a collaborative music project called RhythmRing.
+      You are a world-class music producer. 
+      Analyze this audio snippet.
       
       Identify:
-      1. Musical Role: Is it a 'beat' (percussive), 'melody' (tonal), 'vocal', or 'texture' (ambient/noise)?
-      2. Description: A short, catchy description of the sound (e.g., "Crisp finger snap", "Low-fi desk tap", "Breathy hum").
-      3. Suggested Tempo: Estimated BPM if applicable.
-      4. Mood: One word (e.g., Chill, Energetic, Dark, Bright).
+      1. Musical Role: 'beat', 'melody', 'vocal', or 'texture'.
+      2. Description: Short catchy name (e.g., "Crisp Snap").
+      3. Suggested Tempo: BPM.
+      4. Mood: One word.
       
-      Return ONLY a JSON object with this exact format:
+      Return ONLY JSON:
       {
         "role": "beat" | "melody" | "vocal" | "texture",
         "description": "...",
@@ -107,7 +101,8 @@ export async function POST(request) {
       }
     `;
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash' });
+    // USING THE CORRECT 2026 STABLE MODEL
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
     const result = await model.generateContent([
       {
@@ -121,23 +116,12 @@ export async function POST(request) {
 
     let textResponse = result.response.text();
     textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+    let parsedData = JSON.parse(textResponse);
 
-    let parsedData;
-    try {
-      parsedData = JSON.parse(textResponse);
-    } catch (parseError) {
-      console.error('Failed to parse Gemini response:', textResponse);
-      throw new Error(`Gemini returned invalid JSON. Raw: ${textResponse.substring(0, 200)}`);
-    }
-
-    // Cleanup uploaded file from Gemini
     try {
       await fileManager.deleteFile(uploadResponse.file.name);
-    } catch (e) {
-      // Non-critical
-    }
+    } catch (e) {}
 
-    // Cleanup temp file
     if (tempFilePath) {
       try {
         await fs.unlink(tempFilePath);
@@ -145,22 +129,30 @@ export async function POST(request) {
     }
 
     return NextResponse.json(parsedData);
+
   } catch (error) {
     console.error('Error analyzing audio:', error);
 
-    // Cleanup temp file on error
     if (tempFilePath) {
       try {
         await fs.unlink(tempFilePath);
       } catch (e) {}
     }
 
-    // Return the ACTUAL error instead of a silent fallback
+    // FALLBACK FOR QUOTA LIMITS OR SERVER OVERLOAD (503)
+    const errorStr = error.message || "";
+    if (errorStr.includes('429') || errorStr.includes('503') || errorStr.includes('quota') || errorStr.includes('limit') || errorStr.includes('Unavailable')) {
+      return NextResponse.json({
+        role: "beat",
+        description: "Sound Snippet (Local Fallback)",
+        bpm: 120,
+        mood: "Neutral",
+        isFallback: true
+      });
+    }
+
     return NextResponse.json(
-      {
-        error: error.message || 'Unknown error during analysis',
-        details: process.env.NODE_ENV === 'development' ? error.stack : undefined,
-      },
+      { error: error.message || 'Unknown error during analysis' },
       { status: 500 }
     );
   }

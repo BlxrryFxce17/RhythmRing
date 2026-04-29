@@ -13,6 +13,7 @@ export default function RecordingComponent({ onUpload }) {
   const streamRef = useRef(null);
   const fileInputRef = useRef(null);
   const timerRef = useRef(null);
+  const startTimeRef = useRef(null);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -69,6 +70,8 @@ export default function RecordingComponent({ onUpload }) {
       };
 
       recorder.onstop = async () => {
+        const endTime = Date.now();
+        const duration = (endTime - startTimeRef.current) / 1000;
         const chunks = audioChunksRef.current;
         if (chunks.length === 0) {
           setError("No audio data captured. Try recording for longer.");
@@ -89,10 +92,11 @@ export default function RecordingComponent({ onUpload }) {
 
         // Create an audio URL from the blob so we can play back the REAL recording
         const audioUrl = URL.createObjectURL(audioBlob);
-        await handleUpload(file, audioUrl);
+        await handleUpload(file, audioUrl, duration);
       };
 
       recorder.start(250);
+      startTimeRef.current = Date.now();
       setIsRecording(true);
       setRecordingTime(0);
 
@@ -105,7 +109,7 @@ export default function RecordingComponent({ onUpload }) {
     }
   }, [isRecording]);
 
-  const handleUpload = async (file, audioUrl = null) => {
+  const handleUpload = async (file, audioUrl = null, recordedDuration = null) => {
     setLoading(true);
     setError(null);
 
@@ -128,8 +132,8 @@ export default function RecordingComponent({ onUpload }) {
           setError(data.error);
           if (audioUrl) URL.revokeObjectURL(audioUrl);
         } else {
-          // Pass the real audio URL along with the analysis
-          onUpload({ ...data, audioUrl });
+          // Pass the real audio URL along with the analysis and duration
+          onUpload({ ...data, audioUrl, duration: recordedDuration });
         }
       } else {
         setError(data.error || `Analysis failed (${res.status})`);

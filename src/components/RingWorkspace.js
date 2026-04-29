@@ -2,371 +2,305 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import RecordingComponent from "./RecordingComponent";
-import { getAudioContext, playSnippet, playAllSnippets } from "@/utils/audioUtils";
+import { getAudioContext, playSnippet } from "@/utils/audioUtils";
+
+const PIXELS_PER_SECOND = 150; 
+const TIMELINE_SECONDS = 12;
 
 export default function RingWorkspace({ ring, onBack }) {
   const [snippets, setSnippets] = useState(() => {
-    if (ring.snippets && ring.snippets.length > 0) {
-      return ring.snippets.map((s) => ({
-        ...s,
-        color:
-          s.role === "beat"
-            ? "var(--accent-primary)"
-            : s.role === "melody"
-            ? "var(--accent-secondary)"
-            : s.role === "vocal"
-            ? "var(--accent-tertiary)"
-            : "var(--success)",
-      }));
-    }
-    return [];
+    const base = ring.snippets && ring.snippets.length > 0 ? ring.snippets : [];
+    return base.map((s, i) => ({
+      ...s,
+      startTime: s.startTime ?? i * 1.5,
+      duration: s.duration ?? (s.role === "beat" ? 1.0 : 3.0),
+      color: s.role === "beat" ? "#00f2ff" : s.role === "melody" ? "#7000ff" : s.role === "vocal" ? "#ff00c8" : "#39d353",
+    }));
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false); // USE REF FOR SCHEDULING
   const [playingSnippetId, setPlayingSnippetId] = useState(null);
   const [progress, setProgress] = useState(0);
-  const [hoveredNode, setHoveredNode] = useState(null);
-  const playTimerRef = useRef(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  
   const progressTimerRef = useRef(null);
-  const activeStopRef = useRef(null);
-  // Track all real audio elements so we can stop them
   const audioElementsRef = useRef([]);
+  const timelineRef = useRef(null);
+  const timersRef = useRef([]);
 
-  // Cleanup timers and audio on unmount
   useEffect(() => {
-    return () => {
-      if (playTimerRef.current) clearTimeout(playTimerRef.current);
-      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
-      if (activeStopRef.current) {
-        activeStopRef.current();
-        activeStopRef.current = null;
-      }
-      // Stop and revoke all audio elements
-      audioElementsRef.current.forEach((audio) => {
-        audio.pause();
-        audio.src = "";
-      });
-      audioElementsRef.current = [];
-      // Revoke any blob URLs
-      snippets.forEach((s) => {
-        if (s.audioUrl && s.audioUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(s.audioUrl);
-        }
-      });
-    };
+    return () => stopPlayback();
   }, []);
+
+  const stopPlayback = () => {
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    setProgress(0);
+    setCurrentTime(0);
+    
+    // Clear all scheduled sounds
+    timersRef.current.forEach(t => clearTimeout(t));
+    timersRef.current = [];
+    
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    
+    audioElementsRef.current.forEach((audio) => {
+      audio.pause();
+      audio.currentTime = 0;
+    });
+    audioElementsRef.current = [];
+    setPlayingSnippetId(null);
+  };
 
   const handleNewSnippet = useCallback((analysis) => {
-    const roleColors = {
-      beat: "var(--accent-primary)",
-      melody: "var(--accent-secondary)",
-      vocal: "var(--accent-tertiary)",
-      texture: "var(--success)",
-    };
+    const newId = Date.now();
     const newSnippet = {
-      id: Date.now(),
+      id: newId,
       role: analysis.role || "texture",
-      description: analysis.description || "New sound",
+      description: analysis.description || "Recorded Sound",
       user: "You",
-      note: "C4",
-      variant: Math.floor(Math.random() * 3),
-      color: roleColors[analysis.role] || "var(--accent-tertiary)",
-      bpm: analysis.bpm,
-      mood: analysis.mood,
-      // Store the real audio URL from the recording
+      color: analysis.role === "beat" ? "#00f2ff" : analysis.role === "melody" ? "#7000ff" : "#ff00c8",
       audioUrl: analysis.audioUrl || null,
+      startTime: currentTime > 0 ? currentTime : 0,
+      duration: analysis.duration || 2.0, // Use the real duration from recording
     };
+
+    // NO LONGER OVERWRITING DURATION HERE
+    // The duration is now passed correctly from RecordingComponent
     setSnippets((prev) => [...prev, newSnippet]);
+  }, [currentTime]);
+
+  const handleDeleteSnippet = (id) => {
+    setSnippets((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const handleUpdateStartTime = useCallback((id, newStartTime) => {
+    setSnippets((prev) =>
+      prev.map((s) => {
+        if (s.id === id) {
+          const clampedStart = Math.max(0, Math.min(newStartTime, TIMELINE_SECONDS - s.duration));
+          return { ...s, startTime: clampedStart };
+        }
+        return s;
+      })
+    );
   }, []);
 
-  // Play a single snippet — use real audio if available, else synthesize
-  const handlePlaySnippet = useCallback((snippet) => {
-    setPlayingSnippetId(snippet.id);
-
+  const handlePlaySnippet = (snippet) => {
     if (snippet.audioUrl) {
-      // Play the REAL recorded audio
       const audio = new Audio(snippet.audioUrl);
-      audioElementsRef.current.push(audio);
-
-      audio.onended = () => {
-        setPlayingSnippetId(null);
-        audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
-      };
-      audio.onerror = () => {
-        setPlayingSnippetId(null);
-        audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
-      };
+      setPlayingSnippetId(snippet.id);
+      audio.onended = () => setPlayingSnippetId(null);
       audio.play().catch(() => setPlayingSnippetId(null));
     } else {
-      // Fallback to synthesis for example/demo snippets
       const ctx = getAudioContext();
-      if (activeStopRef.current) activeStopRef.current();
-
-      const { duration, stop } = playSnippet(ctx, snippet);
-      activeStopRef.current = stop;
-
-      setTimeout(() => {
-        setPlayingSnippetId(null);
-        if (activeStopRef.current === stop) activeStopRef.current = null;
-      }, duration * 1000 + 50);
+      playSnippet(ctx, snippet);
+      setPlayingSnippetId(snippet.id);
+      setTimeout(() => setPlayingSnippetId(null), 1000);
     }
-  }, []);
+  };
 
-  // Play all snippets
   const handlePlayAll = useCallback(() => {
     if (snippets.length === 0) return;
-
     if (isPlaying) {
-      // Stop everything
-      setIsPlaying(false);
-      setProgress(0);
-      if (playTimerRef.current) clearTimeout(playTimerRef.current);
-      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
-      // Stop real audio elements
-      audioElementsRef.current.forEach((audio) => {
-        audio.pause();
-        audio.currentTime = 0;
-      });
-      audioElementsRef.current = [];
-      // Stop synthesized audio
-      if (activeStopRef.current) {
-        activeStopRef.current();
-        activeStopRef.current = null;
-      }
+      stopPlayback();
       return;
     }
 
     setIsPlaying(true);
+    isPlayingRef.current = true;
     setProgress(0);
+    setCurrentTime(0);
 
-    // Separate real-audio and synth-only snippets
-    const realAudioSnippets = snippets.filter((s) => s.audioUrl);
-    const synthSnippets = snippets.filter((s) => !s.audioUrl);
+    const startTimestamp = Date.now();
+    const totalDurationMs = TIMELINE_SECONDS * 1000;
 
-    let maxDuration = 0;
-
-    // Play real audio snippets with staggered timing
-    realAudioSnippets.forEach((s, i) => {
-      const delay = i * 500; // 500ms apart
-      setTimeout(() => {
-        const audio = new Audio(s.audioUrl);
-        audioElementsRef.current.push(audio);
-        audio.onended = () => {
-          audioElementsRef.current = audioElementsRef.current.filter((a) => a !== audio);
-        };
-        audio.play().catch(() => {});
+    // Schedule each snippet
+    snippets.forEach((s) => {
+      const delay = s.startTime * 1000;
+      const timer = setTimeout(() => {
+        if (!isPlayingRef.current) return; // DON'T PLAY IF STOPPED
+        
+        if (s.audioUrl) {
+          const audio = new Audio(s.audioUrl);
+          audioElementsRef.current.push(audio);
+          audio.play().catch(err => console.error("Playback error:", err));
+          setPlayingSnippetId(s.id);
+          setTimeout(() => { if (isPlayingRef.current) setPlayingSnippetId(null); }, s.duration * 1000);
+        } else {
+          const ctx = getAudioContext();
+          playSnippet(ctx, s);
+          setPlayingSnippetId(s.id);
+          setTimeout(() => { if (isPlayingRef.current) setPlayingSnippetId(null); }, 1000);
+        }
       }, delay);
-      // Estimate 3s per real audio clip
-      maxDuration = Math.max(maxDuration, (delay + 3000) / 1000);
+      timersRef.current.push(timer);
     });
 
-    // Play synthesized snippets
-    if (synthSnippets.length > 0) {
-      const ctx = getAudioContext();
-      if (activeStopRef.current) activeStopRef.current();
-      const { duration: synthDuration, stop } = playAllSnippets(ctx, synthSnippets);
-      activeStopRef.current = stop;
-      maxDuration = Math.max(maxDuration, synthDuration);
-    }
-
-    // Ensure minimum duration for progress bar
-    maxDuration = Math.max(maxDuration, 1);
-
-    // Animate progress bar
-    const startTime = Date.now();
-    const durationMs = maxDuration * 1000;
+    // Progress bar update
     progressTimerRef.current = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const pct = Math.min((elapsed / durationMs) * 100, 100);
-      setProgress(pct);
-      if (pct >= 100) {
+      if (!isPlayingRef.current) {
         clearInterval(progressTimerRef.current);
+        return;
       }
-    }, 50);
+      const elapsed = Date.now() - startTimestamp;
+      const pct = (elapsed / totalDurationMs) * 100;
+      
+      if (pct >= 100) {
+        stopPlayback();
+      } else {
+        setProgress(pct);
+        setCurrentTime(elapsed / 1000);
+      }
+    }, 16);
 
-    playTimerRef.current = setTimeout(() => {
-      setIsPlaying(false);
-      setProgress(0);
-      clearInterval(progressTimerRef.current);
-      if (activeStopRef.current) {
-        activeStopRef.current();
-        activeStopRef.current = null;
-      }
-    }, durationMs + 200);
   }, [snippets, isPlaying]);
-
-  const roleIcon = (role) => {
-    switch (role) {
-      case "beat": return "🥁";
-      case "melody": return "🎵";
-      case "vocal": return "🎤";
-      case "texture": return "🌊";
-      default: return "🎶";
-    }
-  };
 
   return (
     <div className="fade-in">
-      <button onClick={onBack} className="btn btn-secondary" style={{ marginBottom: "2rem" }}>
-        ← Back to Dashboard
+      <button onClick={onBack} className="btn btn-secondary" style={{ marginBottom: "1rem" }}>
+        ← Dashboard
       </button>
 
-      <div className="glass" style={{ padding: "2rem 2rem 3rem", position: "relative", overflow: "hidden" }}>
-        {/* Header */}
-        <div style={{ textAlign: "center", marginBottom: "2rem" }}>
-          <h1 style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>{ring.name}</h1>
-          <p style={{ color: "var(--text-secondary)" }}>
-            A <span style={{ color: "var(--accent-primary)" }}>{ring.genre}</span> collaboration
-            {snippets.length > 0 && ` · ${snippets.length} sounds layered`}
-          </p>
+      <div className="glass" style={{ padding: "1.5rem", borderRadius: "24px" }}>
+        <header style={{ textAlign: "center", marginBottom: "1.5rem" }}>
+          <h1 style={{ fontSize: "2rem" }}>{ring.name}</h1>
+          <button 
+            className={`btn ${isPlaying ? "btn-danger" : "btn-primary"}`} 
+            onClick={handlePlayAll}
+            style={{ marginTop: "1rem", padding: "0.8rem 3rem", fontSize: "1.1rem" }}
+          >
+            {isPlaying ? "⏹ STOP TRACK" : "▶ PLAY TRACK"}
+          </button>
+        </header>
+
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+            <h3 style={{ fontSize: "0.8rem", opacity: 0.6 }}>ARRANGER</h3>
+            <div style={{ fontFamily: "monospace", fontSize: "1.2rem", color: "#00f2ff" }}>
+                {currentTime.toFixed(2)}s / {TIMELINE_SECONDS}s
+            </div>
         </div>
 
-        {/* Ring Visualization */}
-        <div className={`ring-container ${isPlaying ? "ring-playing" : ""}`}>
-          <div className="main-ring" />
-          <div className="ring-inner">
-            <h3 style={{ fontSize: "2rem", marginBottom: "0.25rem" }}>{snippets.length}</h3>
-            <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "1rem" }}>
-              Sounds Layered
-            </p>
+        <div 
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "320px",
+            background: "#080a0d",
+            borderRadius: "16px",
+            border: "1px solid #1a1d23",
+            overflowX: "auto",
+            overflowY: "hidden"
+          }}
+        >
+          <div 
+            ref={timelineRef}
+            style={{
+              position: "relative",
+              width: `${TIMELINE_SECONDS * PIXELS_PER_SECOND}px`,
+              height: "100%",
+              backgroundImage: `linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)`,
+              backgroundSize: `${PIXELS_PER_SECOND}px 100%`
+            }}
+          >
+            {snippets.map((s, idx) => {
+              const widthPx = s.duration * PIXELS_PER_SECOND;
+              const leftPx = s.startTime * PIXELS_PER_SECOND;
+              const isNodePlaying = playingSnippetId === s.id;
 
-            <button
-              className={`btn ${isPlaying ? "btn-danger" : "btn-primary"}`}
-              style={{ padding: "0.5rem 1.25rem" }}
-              onClick={handlePlayAll}
-              disabled={snippets.length === 0}
-            >
-              {isPlaying ? "■ Stop" : "▶ Play Track"}
-            </button>
+              return (
+                <div
+                  key={s.id}
+                  style={{
+                    position: "absolute",
+                    left: `${leftPx}px`,
+                    top: `${idx * 45 + 20}px`,
+                    width: `${widthPx}px`,
+                    height: "36px",
+                    background: s.color,
+                    borderRadius: "6px",
+                    cursor: "grab",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "0 10px",
+                    fontSize: "0.75rem",
+                    color: "#000",
+                    fontWeight: "bold",
+                    zIndex: 5,
+                    userSelect: "none",
+                    border: "1px solid rgba(255,255,255,0.3)",
+                    boxShadow: isNodePlaying ? `0 0 20px ${s.color}` : "none",
+                    boxSizing: "border-box"
+                  }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    const startX = e.clientX;
+                    const originalStartTime = s.startTime;
+                    const onMouseMove = (moveE) => {
+                      const deltaX = moveE.clientX - startX;
+                      const deltaT = deltaX / PIXELS_PER_SECOND;
+                      handleUpdateStartTime(s.id, originalStartTime + deltaT);
+                    };
+                    const onMouseUp = () => {
+                      window.removeEventListener("mousemove", onMouseMove);
+                      window.removeEventListener("mouseup", onMouseUp);
+                    };
+                    window.addEventListener("mousemove", onMouseMove);
+                    window.addEventListener("mouseup", onMouseUp);
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.description}</span>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); handleDeleteSnippet(s.id); }}
+                    style={{ background: "rgba(0,0,0,0.2)", border: "none", fontWeight: "bold", cursor: "pointer" }}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
 
+            {/* NEON BLUE PLAYHEAD */}
             {isPlaying && (
-              <div className="waveform-container" style={{ marginTop: "0.5rem" }}>
-                {[...Array(8)].map((_, i) => (
-                  <div key={i} className="waveform-bar" />
-                ))}
-              </div>
+              <div style={{
+                position: "absolute",
+                left: `${(progress / 100) * TIMELINE_SECONDS * PIXELS_PER_SECOND}px`,
+                top: 0,
+                bottom: 0,
+                width: "4px",
+                background: "#00f2ff",
+                boxShadow: "0 0 20px #00f2ff, 0 0 40px #00f2ff",
+                zIndex: 10,
+                pointerEvents: "none"
+              }} />
             )}
           </div>
-
-          {/* Sound Nodes on the Ring */}
-          {snippets.map((s, i) => {
-            const angle = (i / snippets.length) * 360;
-            const isNodePlaying = playingSnippetId === s.id;
-            const nodeSize = isNodePlaying ? 50 : 40;
-            return (
-              <div
-                key={s.id}
-                className="ring-node"
-                style={{
-                  position: "absolute",
-                  width: `${nodeSize}px`,
-                  height: `${nodeSize}px`,
-                  borderRadius: "50%",
-                  background: s.color,
-                  transform: `rotate(${angle}deg) translateY(-180px)`,
-                  boxShadow: isNodePlaying
-                    ? `0 0 30px ${s.color}, 0 0 60px ${s.color}`
-                    : `0 0 15px ${s.color}`,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "all 0.3s ease",
-                  zIndex: isNodePlaying ? 20 : 1,
-                }}
-                onClick={() => handlePlaySnippet(s)}
-                onMouseEnter={() => setHoveredNode(s.id)}
-                onMouseLeave={() => setHoveredNode(null)}
-                title={`${s.user}: ${s.description}`}
-              >
-                <span style={{ fontSize: "0.7rem", fontWeight: "800", color: "#000" }}>
-                  {roleIcon(s.role)}
-                </span>
-                {hoveredNode === s.id && (
-                  <div className="node-tooltip" style={{ top: "-40px", left: "50%", transform: "translateX(-50%)", opacity: 1 }}>
-                    {s.description} — {s.user}
-                  </div>
-                )}
-              </div>
-            );
-          })}
         </div>
 
-        {/* Progress bar */}
-        {isPlaying && (
-          <div className="progress-container" style={{ maxWidth: "400px", margin: "0 auto" }}>
-            <div className="progress-bar" style={{ width: `${progress}%` }} />
+        {/* TRACK LAYERS LIST */}
+        <div style={{ marginTop: "2rem" }}>
+          <h3 style={{ marginBottom: "1rem", fontSize: "1rem", opacity: 0.7 }}>TRACK LAYERS ({snippets.length})</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+            {snippets.map((s) => (
+              <div key={s.id} className="glass" style={{ padding: "0.8rem", display: "flex", justifyContent: "space-between", alignItems: "center", borderLeft: `5px solid ${s.color}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.8rem" }}>
+                  <button onClick={() => handlePlaySnippet(s)} style={{ background: s.color, color: "#000", border: "none", borderRadius: "50%", width: "28px", height: "28px", cursor: "pointer" }}>▶</button>
+                  <div>
+                    <p style={{ fontWeight: "bold", fontSize: "0.9rem" }}>{s.description}</p>
+                    <p style={{ fontSize: "0.7rem", opacity: 0.6 }}>{s.duration.toFixed(2)}s @ {s.startTime.toFixed(2)}s</p>
+                  </div>
+                </div>
+                <button onClick={() => handleDeleteSnippet(s.id)} style={{ background: "none", border: "none", cursor: "pointer" }}>🗑️</button>
+              </div>
+            ))}
           </div>
-        )}
+        </div>
 
-        {/* Empty state */}
-        {snippets.length === 0 && (
-          <div style={{ textAlign: "center", padding: "2rem 0", color: "var(--text-secondary)" }}>
-            <p style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>This ring is empty</p>
-            <p>Record or upload a sound below to get started!</p>
-          </div>
-        )}
-
-        {/* Add Your Sound */}
-        <div style={{ marginTop: "3rem", borderTop: "1px solid var(--border-color)", paddingTop: "2rem" }}>
-          <h2 style={{ textAlign: "center", marginBottom: "1.5rem" }}>Add Your Sound</h2>
+        <div style={{ marginTop: "2rem" }}>
           <RecordingComponent onUpload={handleNewSnippet} />
         </div>
-
-        {/* Contributions list */}
-        {snippets.length > 0 && (
-          <div style={{ marginTop: "3rem" }}>
-            <h3 style={{ marginBottom: "1rem" }}>
-              Contributions ({snippets.length})
-            </h3>
-            <div style={{ display: "grid", gap: "0.75rem" }}>
-              {snippets.slice().reverse().map((s) => {
-                const isItemPlaying = playingSnippetId === s.id;
-                return (
-                  <div
-                    key={s.id}
-                    className="glass"
-                    style={{
-                      padding: "1rem 1.25rem",
-                      borderRadius: "12px",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      border: `1px solid ${isItemPlaying ? s.color : `${s.color}33`}`,
-                      transition: "all 0.3s ease",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: "1rem", flex: 1 }}>
-                      <button
-                        className={`snippet-play-btn ${isItemPlaying ? "playing" : ""}`}
-                        onClick={() => handlePlaySnippet(s)}
-                        style={isItemPlaying ? { background: s.color } : {}}
-                      >
-                        {isItemPlaying ? "■" : "▶"}
-                      </button>
-                      <div>
-                        <p style={{ fontWeight: "600", fontSize: "0.95rem" }}>
-                          {s.description}
-                          {s.audioUrl && (
-                            <span style={{ fontSize: "0.7rem", marginLeft: "0.5rem", opacity: 0.6 }}>
-                              🔊 real audio
-                            </span>
-                          )}
-                        </p>
-                        <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                          By {s.user}
-                          {s.bpm && ` · ${s.bpm} BPM`}
-                          {s.mood && ` · ${s.mood}`}
-                        </p>
-                      </div>
-                    </div>
-                    <span className={`tag tag-${s.role}`}>{s.role}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

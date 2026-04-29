@@ -101,7 +101,6 @@ export async function POST(request) {
       }
     `;
 
-    // USING THE CORRECT 2026 STABLE MODEL
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
     const result = await model.generateContent([
@@ -120,12 +119,12 @@ export async function POST(request) {
 
     try {
       await fileManager.deleteFile(uploadResponse.file.name);
-    } catch (e) {}
+    } catch (e) { }
 
     if (tempFilePath) {
       try {
         await fs.unlink(tempFilePath);
-      } catch (e) {}
+      } catch (e) { }
     }
 
     return NextResponse.json(parsedData);
@@ -136,7 +135,7 @@ export async function POST(request) {
     if (tempFilePath) {
       try {
         await fs.unlink(tempFilePath);
-      } catch (e) {}
+      } catch (e) { }
     }
 
     // FALLBACK FOR QUOTA LIMITS OR SERVER OVERLOAD (503)
